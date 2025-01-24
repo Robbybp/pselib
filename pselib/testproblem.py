@@ -31,6 +31,46 @@ TestProblemBase abstract class.
 import abc
 
 
+"""
+TODO:
+__init__ method: What should be required to define an "instance of a problem"?
+    - parameters
+    - parameter ranges
+    How are parameters (the keys themselves, not the values) validated?
+    We may want to vary things that are not explicit mutable parameters in the
+    model. Maybe they are arguments to some model construction function...
+
+How to handle parameters that are not "model parameters" (i.e., they are not
+accessible via find_component)?
+    - E.g. a parameter of the setpoint in a control problem
+    - We definitely want to support these, right?
+    - Some API consistency should be supported:
+      - Print name of parameter
+      - Get range of values
+      - Create a model with particular values of these parameters. "Instance parameters"
+        (like nfe) must be provided at model construction time. "Model parameters"
+        can be provided here. An advantage of setting model parameters here is that
+        we can scale them if necessary.
+        By convention, setting model parameters here should be equivalent to setting
+        them directly on the model immediately following construction (as long as
+        scaling is done properly).
+
+set_model_parameter function that automatically applies scaling to parameters if
+necessary?
+
+initialize_model method. I'd like this library to be useful for testing custom
+initialization strategies, so I need to separate model initialization.
+
+scale_model method. I'd like this library to be useful for testing custom scaling
+methods, so I need a separate scaling method.
+
+initialize=True and scale=True should probably be arguments to create_instance,
+so the uninterested user doesn't have to think about these.
+
+create_instance: This name is a bit confusing, since "instance" could mean an
+instance of this class. create_model is probably better.
+
+"""
 class PseTestProblemBase(abc.ABC):
 
     @abc.abstractmethod
