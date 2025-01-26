@@ -70,6 +70,10 @@ so the uninterested user doesn't have to think about these.
 create_instance: This name is a bit confusing, since "instance" could mean an
 instance of this class. create_model is probably better.
 
+has_external_functions: Want some API to query properties of the model like this.
+Some of these models won't be compatible with e.g. Baron because they have external
+functions.
+
 """
 class PseTestProblemBase(abc.ABC):
 
