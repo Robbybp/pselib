@@ -114,24 +114,21 @@ def _make_model(
     _fix_dof(model)
 
     if dynamic:
-        raise RuntimeError()
-    #    # Fix initial conditions
-    #    dae = DAEInterface(model, model.fs.time)
-    #    # Note that the "differential subsystem" is "not defined" at t0
-    #    # as the discretization equations don't exist.
-    #    t0 = model.fs.time.first()
-    #    t1 = list(model.fs.time)[1]
-    #    diff_deriv_disc_list = dae.get_valid_diff_deriv_disc_at_time(t1)
-    #    # Note that these variables are already indexed.
-    #    diff_vars = [var for var, _, _ in diff_deriv_disc_list]
-    #    for var in diff_vars:
-    #        var[t0].fix()
+        # Fix initial conditions
+        t0 = model.fs.time.first()
+        for x in model.fs.moving_bed.length_domain:
+            if x != model.fs.moving_bed.length_domain.first():
+                model.fs.moving_bed.gas_phase.material_holdup[t0, x, ...].fix()
+                model.fs.moving_bed.gas_phase.energy_holdup[t0, x, ...].fix()
+            if x != model.fs.moving_bed.length_domain.last():
+                model.fs.moving_bed.solid_phase.material_holdup[t0, x, ...].fix()
+                model.fs.moving_bed.solid_phase.energy_holdup[t0, x, ...].fix()
 
-    #    # Initialize derivatives to zero
-    #    model.fs.moving_bed.gas_phase.material_accumulation[...].set_value(0.0)
-    #    model.fs.moving_bed.gas_phase.energy_accumulation[...].set_value(0.0)
-    #    model.fs.moving_bed.solid_phase.material_accumulation[...].set_value(0.0)
-    #    model.fs.moving_bed.solid_phase.energy_accumulation[...].set_value(0.0)
+        # Initialize derivatives to zero
+        model.fs.moving_bed.gas_phase.material_accumulation[...].set_value(0.0)
+        model.fs.moving_bed.gas_phase.energy_accumulation[...].set_value(0.0)
+        model.fs.moving_bed.solid_phase.material_accumulation[...].set_value(0.0)
+        model.fs.moving_bed.solid_phase.energy_accumulation[...].set_value(0.0)
 
     return model
 
@@ -198,6 +195,124 @@ def _initialize(model):
     )
 
 
+def _get_disturbance_data(horizon=60.0):
+    disturbance_dict = {"CO2": 0.5, "H2O": 0.0, "CH4": 0.5}
+    disturbance = mpc.IntervalData(
+        {
+            "fs.moving_bed.gas_phase.properties[*,0.0].mole_frac_comp[%s]" % j: [val]
+            for j, val in disturbance_dict.items()
+        },
+        [(0.0, horizon)],
+    )
+    return disturbance
+
+
+def get_state_variable_names(space):
+    setpoint_states = []
+    setpoint_states.extend(
+        "fs.moving_bed.gas_phase.properties[*,%s].flow_mol" % x
+        for x in space if x != space.first()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.gas_phase.properties[*,%s].temperature" % x
+        for x in space if x != space.first()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.gas_phase.properties[*,%s].pressure" % x
+        for x in space if x != space.first()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.gas_phase.properties[*,%s].mole_frac_comp[CH4]" % x
+        for x in space if x != space.first()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.gas_phase.properties[*,%s].mole_frac_comp[H2O]" % x
+        for x in space if x != space.first()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.gas_phase.properties[*,%s].mole_frac_comp[CO2]" % x
+        for x in space if x != space.first()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.solid_phase.properties[*,%s].flow_mass" % x
+        for x in space if x != space.last()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.solid_phase.properties[*,%s].temperature" % x
+        for x in space if x != space.last()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.solid_phase.properties[*,%s].mass_frac_comp[Fe2O3]" % x
+        for x in space if x != space.last()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.solid_phase.properties[*,%s].mass_frac_comp[Fe3O4]" % x
+        for x in space if x != space.last()
+    )
+    setpoint_states.extend(
+        "fs.moving_bed.solid_phase.properties[*,%s].mass_frac_comp[Al2O3]" % x
+        for x in space if x != space.last()
+    )
+    return setpoint_states
+
+
+def _get_setpoint_model(
+    nfe=10,
+    target_conversion=0.95,
+):
+    m = _make_model(nxfe=nfe)
+
+    horizon = 60.0
+    disturbance = _get_disturbance_data(horizon=horizon)
+    setpoint_interface = mpc.DynamicModelInterface(m, m.fs.time)
+    setpoint_inputs = mpc.ScalarData({
+        "fs.moving_bed.gas_phase.properties[*,0.0].flow_mol": 128.2,
+        "fs.moving_bed.solid_phase.properties[*,1.0].flow_mass": 591.4,
+    })
+    setpoint_interface.load_data(setpoint_inputs)
+    iscale.calculate_scaling_factors(m)
+    setpoint_interface.load_data(disturbance.get_data_at_time(horizon))
+
+    _initialize(m)
+    solver = pyo.SolverFactory("ipopt")
+    solver.solve(m, tee=True)
+
+    sp_target = {"fs.moving_bed.solid_phase.reactions[*,0.0].OC_conv": target_conversion}
+    m.fs.moving_bed.gas_inlet.flow_mol[:].unfix()
+    (
+        m.penalty_set, m.conv_penalty
+    ) = setpoint_interface.get_penalty_from_target(sp_target)
+    m.obj = pyo.Objective(expr=sum(m.conv_penalty.values()))
+
+    for x in m.fs.moving_bed.length_domain:
+        var = m.fs.moving_bed.gas_phase.properties[0, x].dens_mol
+        m.fs.moving_bed.gas_phase.properties[0, x].scaling_factor[var] = 1.0
+
+        var = m.fs.moving_bed.solid_phase.reactions[0, x].OC_conv
+        m.fs.moving_bed.gas_phase.properties[0, x].scaling_factor[var] = 1.0
+
+        var = m.fs.moving_bed.solid_phase.reactions[0, x].OC_conv_temp
+        m.fs.moving_bed.gas_phase.properties[0, x].scaling_factor[var] = 1.0
+
+        var = m.fs.moving_bed.Nu_particle[0, x]
+        m.fs.moving_bed.scaling_factor[var] = 1.0
+        var = m.fs.moving_bed.Pr_particle[0, x]
+        m.fs.moving_bed.scaling_factor[var] = 1.0
+        var = m.fs.moving_bed.Re_particle[0, x]
+        m.fs.moving_bed.scaling_factor[var] = 1.0
+    return m
+
+
+def _get_setpoint_data(nfe=10, target_conversion=0.95):
+    m = _get_setpoint_model(nfe=nfe, target_conversion=target_conversion)
+    solver = pyo.SolverFactory("ipopt")
+    solver.options["nlp_scaling_method"] = "user-scaling"
+    solver.solve(m, tee=True)
+    setpoint_interface = mpc.DynamicModelInterface(m, m.fs.time)
+    setpoint_data = setpoint_interface.get_data_at_time()
+    return setpoint_data
+
+
 class SteadyMbclcMethane(PseTestProblemBase):
 
     @classmethod
@@ -230,60 +345,137 @@ class SteadyMbclcMethane(PseTestProblemBase):
     # Should this class be configured during instantiation?
     # Or at the call to construct?
     def create_instance(self, nfe=10):
-        m = _make_model(nxfe=nfe)
+        m = _get_setpoint_model(nfe=nfe)
+        return m
 
-        horizon = 60.0
-        disturbance_dict = {"CO2": 0.5, "H2O": 0.0, "CH4": 0.5}
-        disturbance = mpc.IntervalData(
-            {
-                "fs.moving_bed.gas_phase.properties[*,0.0].mole_frac_comp[%s]" % j: [val]
-                for j, val in disturbance_dict.items()
-            },
-            [(0.0, horizon)],
+
+class DynamicMbclcMethane(PseTestProblemBase):
+
+    @classmethod
+    @property
+    def uid(cls):
+        return "MBCLC-METHANE-DYNAMIC"
+
+    def __init__(self):
+        # TODO: allow specification of parameters as configuration arg?
+        self._parameters = [
+            pyo.ComponentUID("fs.moving_bed.solid_phase.properties[0,1].temperature"),
+            pyo.ComponentUID("fs.moving_bed.solid_phase.properties[0,1].flow_mass"),
+        ]
+        _parameter_range_list = [
+            (1000.0*pyo.units.K, 1400.0*pyo.units.K),
+            (500.0*pyo.units.kg/pyo.units.s, 700.0*pyo.units.kg/pyo.units.s),
+            #(1183.14, 1183.16),
+            #(591.3, 592.5),
+        ]
+        self._parameter_ranges = dict(zip(self._parameters, _parameter_range_list))
+
+    def create_instance(self, nxfe=10, ntfe=20):
+        m = _make_model(dynamic=True, ntfe=20, nxfe=10)
+        # Add objective function
+        dyn = mpc.DynamicModelInterface(m, m.fs.time)
+        #setpoint = _get_setpoint_data(nfe=nxfe, target_conversion=0.95)
+
+        # Solve a model where the setpoint is the initial state
+        m_sp = _make_model(dynamic=False, nxfe=nxfe)
+        _initialize(m_sp)
+        solver = pyo.SolverFactory("ipopt")
+        solver.solve(m_sp, tee=True)
+        sp_dyn = mpc.DynamicModelInterface(m_sp, m_sp.fs.time)
+        setpoint = sp_dyn.get_data_at_time()
+
+        # Extract variable that I actually want to use in the setpoint
+        setpoint_varnames = get_state_variable_names(m.fs.moving_bed.length_domain)
+        setpoint_vars = [m.find_component(name) for name in setpoint_varnames]
+        weight_data = {}
+        for name in setpoint_varnames:
+            if "temperature" in name:
+                weight_data[name] = (1 / 100.0)**2
+            elif "flow_mass" in name:
+                weight_data[name] = (1 / 1000.0)**2
+            elif "flow_mol" in name:
+                weight_data[name] = (1 / 100.0)**2
+            else:
+                weight_data[name] = 1.0
+        m.setpoint_set, m.setpoint_expr = dyn.get_penalty_from_target(
+            setpoint, variables=setpoint_vars, weight_data=weight_data
+        )
+        m.setpoint_objective = pyo.Objective(
+            expr=sum(m.setpoint_expr[i, t] for i in m.setpoint_set for t in m.fs.time)
         )
 
-        setpoint_interface = mpc.DynamicModelInterface(m, m.fs.time)
-        setpoint_inputs = mpc.ScalarData({
-            "fs.moving_bed.gas_phase.properties[*,0.0].flow_mol": 128.2,
-            "fs.moving_bed.solid_phase.properties[*,1.0].flow_mass": 591.4,
-        })
-        setpoint_interface.load_data(setpoint_inputs)
-        iscale.calculate_scaling_factors(m)
-        setpoint_interface.load_data(disturbance.get_data_at_time(horizon))
+        # Apply disturbance
+        #disturbance = _get_disturbance_data()
+        #dyn.load_data(disturbance)
 
-        _initialize(m)
+        # Unfix control variables
+        for t in m.fs.time:
+            if t != m.fs.time.first():
+                m.fs.moving_bed.gas_inlet.flow_mol[t].unfix()
+                m.fs.moving_bed.solid_inlet.flow_mass[t].unfix()
+        # Add piecewise-constant constraints
+        sample_points = [t for i, t in enumerate(m.fs.time) if (i % 2 == 0)]
+        dof_vars = [
+            m.fs.moving_bed.gas_inlet.flow_mol,
+            m.fs.moving_bed.solid_inlet.flow_mass,
+        ]
+        m.pwc_set, m.pwc_con = dyn.get_piecewise_constant_constraints(dof_vars, sample_points)
+
+        # Set bounds
+        # Some "operational" bounds on control inputs
+        m.fs.moving_bed.gas_inlet.flow_mol.setlb(80.0)
+        m.fs.moving_bed.gas_inlet.flow_mol.setub(200.0)
+        m.fs.moving_bed.solid_inlet.flow_mass.setlb(400.0)
+        m.fs.moving_bed.solid_inlet.flow_mass.setub(1200.0)
+        # Some safety/physical limit bounds
+        m.fs.moving_bed.gas_phase.properties[:, :].temperature.setlb(200.0)
+        m.fs.moving_bed.gas_phase.properties[:, :].temperature.setub(2000.0)
+        m.fs.moving_bed.solid_phase.properties[:, :].temperature.setlb(200.0)
+        m.fs.moving_bed.solid_phase.properties[:, :].temperature.setub(2000.0)
+        m.fs.moving_bed.gas_phase.properties[:, :].flow_mol.setlb(100.0)
+        m.fs.moving_bed.gas_phase.properties[:, :].flow_mol.setub(1000.0)
+        m.fs.moving_bed.solid_phase.properties[:, :].flow_mass.setlb(100.0)
+        m.fs.moving_bed.solid_phase.properties[:, :].flow_mass.setub(2000.0)
+
+        # Initialize
+        # Initialization should come after the problem is all set up, because it should
+        # be equivalent to call initialize after this method instead.
+        m_init = _make_model(dynamic=False, nxfe=nxfe)
+        _initialize(m_init)
         solver = pyo.SolverFactory("ipopt")
-        solver.solve(m, tee=True)
+        solver.solve(m_init, tee=True)
+        # TODO: Raise error if time is not a set in the model?
+        init_dyn = mpc.DynamicModelInterface(m_init, m_init.fs.time)
+        init_data = init_dyn.get_data_at_time()
+        # Initialize dynamic model to an initial steady state solution
+        dyn.load_data(init_data)
+        # At this point, non-time-indexed variables in the dynamic model have not been
+        # initialized.
+        scalar_data = init_dyn.get_scalar_variable_data()
+        dyn.load_data(scalar_data)
 
-        sp_target = {"fs.moving_bed.solid_phase.reactions[*,0.0].OC_conv": 0.95}
-        m.fs.moving_bed.gas_inlet.flow_mol[:].unfix()
-        (
-            m.penalty_set, m.conv_penalty
-        ) = setpoint_interface.get_penalty_from_target(sp_target)
-        m.obj = pyo.Objective(expr=sum(m.conv_penalty.values()))
+        from pselib.evaluation import assert_primal_feasibility
+        assert_primal_feasibility(m_init, atol=1e-5)
 
-        for x in m.fs.moving_bed.length_domain:
-            var = m.fs.moving_bed.gas_phase.properties[0, x].dens_mol
-            m.fs.moving_bed.gas_phase.properties[0, x].scaling_factor[var] = 1.0
+        m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
 
-            var = m.fs.moving_bed.solid_phase.reactions[0, x].OC_conv
-            m.fs.moving_bed.gas_phase.properties[0, x].scaling_factor[var] = 1.0
+        # Set some dummy scaling factors to avoid warnings
+        # ... these aren't getting rid of the warnings
+        var = m.fs.moving_bed.solid_phase.heat
+        m.scaling_factor[var] = 1.0
+        var = m.fs.moving_bed.solid_phase.rate_reaction_extent
+        m.scaling_factor[var] = 1.0
+        var = m.fs.moving_bed.solid_phase.area
+        m.scaling_factor[var] = 1.0
+        var = m.fs.moving_bed.gas_phase.heat
+        m.scaling_factor[var] = 1.0
+        var = m.fs.moving_bed.gas_phase.area
+        m.scaling_factor[var] = 1.0
 
-            var = m.fs.moving_bed.solid_phase.reactions[0, x].OC_conv_temp
-            m.fs.moving_bed.gas_phase.properties[0, x].scaling_factor[var] = 1.0
+        # Scale model
+        iscale.calculate_scaling_factors(m)
 
-            var = m.fs.moving_bed.Nu_particle[0, x]
-            m.fs.moving_bed.scaling_factor[var] = 1.0
-            var = m.fs.moving_bed.Pr_particle[0, x]
-            m.fs.moving_bed.scaling_factor[var] = 1.0
-            var = m.fs.moving_bed.Re_particle[0, x]
-            m.fs.moving_bed.scaling_factor[var] = 1.0
-
-        # The problem with scaling the model here is that all subsequent
-        # parameters must be set with the scaling transformation in mind, which
-        # is not practical.
-        #pyo.TransformationFactory("core.scale_model").apply_to(m, rename=False)
-
+        # Set any model parameters we know about at this point
         return m
 
 
