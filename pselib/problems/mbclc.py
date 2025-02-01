@@ -19,6 +19,7 @@
 #  ___________________________________________________________________________
 
 from pselib.testproblem import PseTestProblemBase
+from pselib.evaluation import assert_primal_feasibility
 import pyomo.environ as pyo
 import pyomo.contrib.mpc as mpc
 
@@ -359,30 +360,47 @@ class DynamicMbclcMethane(PseTestProblemBase):
     def __init__(self):
         # TODO: allow specification of parameters as configuration arg?
         self._parameters = [
-            pyo.ComponentUID("fs.moving_bed.solid_phase.properties[0,1].temperature"),
-            pyo.ComponentUID("fs.moving_bed.solid_phase.properties[0,1].flow_mass"),
+            pyo.ComponentUID("fs.moving_bed.solid_inlet.temperature"),
+            pyo.ComponentUID("fs.moving_bed.solid_phase.material_holdup"),
         ]
         _parameter_range_list = [
-            (1000.0*pyo.units.K, 1400.0*pyo.units.K),
+            (800.0*pyo.units.K, 2000.0*pyo.units.K),
             (500.0*pyo.units.kg/pyo.units.s, 700.0*pyo.units.kg/pyo.units.s),
             #(1183.14, 1183.16),
             #(591.3, 592.5),
         ]
         self._parameter_ranges = dict(zip(self._parameters, _parameter_range_list))
 
-    def create_instance(self, nxfe=10, ntfe=20):
-        m = _make_model(dynamic=True, ntfe=20, nxfe=10)
+    def set_parameter_values(self, model, parameters):
+        for key, val in parameters.items():
+            if key == "fs.moving_bed.solid_inlet.temperature":
+                for t in model.fs.time:
+                    # TODO: set this time threshold as an instance argument?
+                    # TODO: Use find_nearest_index instead of float tolerances
+                    if t <= 60.0+1e-6:
+                        model.fs.moving_bed.solid_inlet.temperature[t].fix(val)
+            elif key == "fs.moving_bed.solid_phase.material_holdup":
+                t0 = model.fs.time.first()
+                for x in model.fs.moving_bed.length_domain:
+                    # TODO: Set this threshold as well
+                    if x >= 0.8-1e-6:
+                        for var in model.fs.moving_bed.solid_phase.material_holdup[t0, x, ...]:
+                            var.set_value(var.value * 0.9)
+
+    def create_instance(self, nxfe=10, ntfe=20, tfe_width=15.0):
+        m = _make_model(dynamic=True, nxfe=nxfe, ntfe=ntfe, tfe_width=tfe_width)
+        horizon = tfe_width * ntfe
         # Add objective function
         dyn = mpc.DynamicModelInterface(m, m.fs.time)
-        #setpoint = _get_setpoint_data(nfe=nxfe, target_conversion=0.95)
+        setpoint = _get_setpoint_data(nfe=nxfe, target_conversion=0.97)
 
         # Solve a model where the setpoint is the initial state
-        m_sp = _make_model(dynamic=False, nxfe=nxfe)
-        _initialize(m_sp)
-        solver = pyo.SolverFactory("ipopt")
-        solver.solve(m_sp, tee=True)
-        sp_dyn = mpc.DynamicModelInterface(m_sp, m_sp.fs.time)
-        setpoint = sp_dyn.get_data_at_time()
+        #m_sp = _make_model(dynamic=False, nxfe=nxfe)
+        #_initialize(m_sp)
+        #solver = pyo.SolverFactory("ipopt")
+        #solver.solve(m_sp, tee=True)
+        #sp_dyn = mpc.DynamicModelInterface(m_sp, m_sp.fs.time)
+        #setpoint = sp_dyn.get_data_at_time()
 
         # Extract variable that I actually want to use in the setpoint
         setpoint_varnames = get_state_variable_names(m.fs.moving_bed.length_domain)
@@ -404,10 +422,6 @@ class DynamicMbclcMethane(PseTestProblemBase):
             expr=sum(m.setpoint_expr[i, t] for i in m.setpoint_set for t in m.fs.time)
         )
 
-        # Apply disturbance
-        #disturbance = _get_disturbance_data()
-        #dyn.load_data(disturbance)
-
         # Unfix control variables
         for t in m.fs.time:
             if t != m.fs.time.first():
@@ -426,12 +440,13 @@ class DynamicMbclcMethane(PseTestProblemBase):
         m.fs.moving_bed.gas_inlet.flow_mol.setlb(80.0)
         m.fs.moving_bed.gas_inlet.flow_mol.setub(200.0)
         m.fs.moving_bed.solid_inlet.flow_mass.setlb(400.0)
-        m.fs.moving_bed.solid_inlet.flow_mass.setub(1200.0)
+        #m.fs.moving_bed.solid_inlet.flow_mass.setub(1200.0)
+        m.fs.moving_bed.solid_inlet.flow_mass.setub(1000.0)
         # Some safety/physical limit bounds
         m.fs.moving_bed.gas_phase.properties[:, :].temperature.setlb(200.0)
-        m.fs.moving_bed.gas_phase.properties[:, :].temperature.setub(2000.0)
+        m.fs.moving_bed.gas_phase.properties[:, :].temperature.setub(2200.0)
         m.fs.moving_bed.solid_phase.properties[:, :].temperature.setlb(200.0)
-        m.fs.moving_bed.solid_phase.properties[:, :].temperature.setub(2000.0)
+        m.fs.moving_bed.solid_phase.properties[:, :].temperature.setub(2200.0)
         m.fs.moving_bed.gas_phase.properties[:, :].flow_mol.setlb(100.0)
         m.fs.moving_bed.gas_phase.properties[:, :].flow_mol.setub(1000.0)
         m.fs.moving_bed.solid_phase.properties[:, :].flow_mass.setlb(100.0)
@@ -454,11 +469,29 @@ class DynamicMbclcMethane(PseTestProblemBase):
         scalar_data = init_dyn.get_scalar_variable_data()
         dyn.load_data(scalar_data)
 
-        from pselib.evaluation import assert_primal_feasibility
+        # Apply disturbance
+        # Disturbance needs to be applied after initialization. Otherwise initialization
+        # with the initial steady state will override the disturbance.
+        disturbance = _get_disturbance_data(horizon=horizon)
+        dyn.load_data(disturbance)
+        # Setting an additional disturbance for the first minute of operation makes
+        # the problem more difficult to solve. We stop converging at about 1800 K.
+        for t in m.fs.time:
+            if t <= 60.0+1e-6: # Account for float roundoff in time points
+                m.fs.moving_bed.solid_inlet.temperature[t].fix(1800.0*pyo.units.K)
+
+        # Apply a perturbation to the initial condition of the dynamic model.
+        # This doesn't even converge with a 1% perturbation for all x. Maybe I need
+        # to only perturb a limited x?
+        t0 = m.fs.time.first()
+        for x in m.fs.moving_bed.length_domain:
+            # I don't think we need to skip the inlet here.
+            if x >= 0.8-1e-6:
+                for var in m.fs.moving_bed.solid_phase.material_holdup[t0, x, ...]:
+                    var.set_value(var.value * 0.9)
+
         assert_primal_feasibility(m_init, atol=1e-5)
-
         m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
-
         # Set some dummy scaling factors to avoid warnings
         # ... these aren't getting rid of the warnings
         var = m.fs.moving_bed.solid_phase.heat
@@ -480,7 +513,16 @@ class DynamicMbclcMethane(PseTestProblemBase):
 
 
 if __name__ == "__main__":
-    problem = SteadyMbclcMethane()
-    m = problem.create_instance()
-    solver = pyo.SolverFactory("ipopt")
-    solver.solve(m, tee=True)
+    # TODO: CLI argument for steady vs dynamic
+    steady = False
+    if steady:
+        problem = SteadyMbclcMethane()
+        m = problem.create_instance()
+        solver = pyo.SolverFactory("ipopt")
+        solver.solve(m, tee=True)
+    else:
+        problem = DynamicMbclcMethane()
+        m = problem.create_instance()
+        solver = pyo.SolverFactory("ipopt")
+        solver.solve(m, tee=True)
+        dyn = mpc.DynamicModelInterface(m, m.fs.time)
