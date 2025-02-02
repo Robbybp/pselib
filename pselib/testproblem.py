@@ -86,3 +86,17 @@ class PseTestProblemBase(abc.ABC):
         """Construct a Pyomo model of this test problem
         """
         pass
+
+    def set_parameter_values(self, model, parameters):
+        """Set parameter values on the model
+
+        This default method assumes that parameters are discoverable on the
+        model via ``find_component`` and that values can be used directly with
+        no additional processing (e.g. scaling).
+        This method should be overridden for models that need scaling or some other
+        preprocessing (e.g. a steady state setpoint solve) before setting parameter
+        values, or whose parameters don't correspond to a single Pyomo ``ComponentUID``.
+
+        """
+        for key, val in parameters.items():
+            model.find_component(key).set_value(val)

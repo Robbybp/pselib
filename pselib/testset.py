@@ -18,11 +18,12 @@
 #  This software is distributed under the 3-clause BSD license.
 #  ___________________________________________________________________________
 
-from pselib.problems.mbclc import SteadyMbclcMethane
+from pselib.problems.mbclc import SteadyMbclcMethane, DynamicMbclcMethane
 
 
 ALL_TEST_PROBLEM_CLASSES = [
     SteadyMbclcMethane,
+    DynamicMbclcMethane,
 ]
 
 TEST_PROBLEM_LOOKUP = {
@@ -43,6 +44,8 @@ class TestSet:
         # Note that there may be some reason to defer instantiation, for example
         # if we want to instantiate multiple times with different parameters
         # at some point.
+        # TODO: Allow passing this method instantiated TestProblems. These could
+        # have been constructed with additional parameters like nfe.
         if test_problem_uids is None:
             self._problems = list(
                 problemclass() for problemclass in TEST_PROBLEM_LOOKUP.values()

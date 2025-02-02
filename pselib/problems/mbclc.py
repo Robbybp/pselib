@@ -360,34 +360,46 @@ class DynamicMbclcMethane(PseTestProblemBase):
     def __init__(self):
         # TODO: allow specification of parameters as configuration arg?
         self._parameters = [
-            pyo.ComponentUID("fs.moving_bed.solid_inlet.temperature"),
-            pyo.ComponentUID("fs.moving_bed.solid_phase.material_holdup"),
+            # We will set solid inlet temperature for the first minute of operation
+            "fs.moving_bed.solid_inlet.temperature",
+            # We multiply initial material holdup by a factor for the top 20% of the
+            # reactor.
+            "initial_material_holdup_factor",
         ]
         _parameter_range_list = [
             (800.0*pyo.units.K, 2000.0*pyo.units.K),
-            (500.0*pyo.units.kg/pyo.units.s, 700.0*pyo.units.kg/pyo.units.s),
-            #(1183.14, 1183.16),
-            #(591.3, 592.5),
+            # These are just factors that multiply the initial steady state values
+            # This is to avoid having to specify a different holdup for each component.
+            (0.8, 2.0),
         ]
         self._parameter_ranges = dict(zip(self._parameters, _parameter_range_list))
 
+    @property
+    def parameters(self):
+        return self._parameters
+
+    @property
+    def parameter_ranges(self):
+        return self._parameter_ranges
+
     def set_parameter_values(self, model, parameters):
         for key, val in parameters.items():
+            # Accept string or ComponentUID as a key
             if key == "fs.moving_bed.solid_inlet.temperature":
                 for t in model.fs.time:
                     # TODO: set this time threshold as an instance argument?
                     # TODO: Use find_nearest_index instead of float tolerances
                     if t <= 60.0+1e-6:
                         model.fs.moving_bed.solid_inlet.temperature[t].fix(val)
-            elif key == "fs.moving_bed.solid_phase.material_holdup":
+            elif key == "initial_material_holdup_factor":
                 t0 = model.fs.time.first()
                 for x in model.fs.moving_bed.length_domain:
                     # TODO: Set this threshold as well
                     if x >= 0.8-1e-6:
                         for var in model.fs.moving_bed.solid_phase.material_holdup[t0, x, ...]:
-                            var.set_value(var.value * 0.9)
+                            var.set_value(var.value * val)
 
-    def create_instance(self, nxfe=10, ntfe=20, tfe_width=15.0):
+    def create_instance(self, nxfe=20, ntfe=20, tfe_width=15.0):
         m = _make_model(dynamic=True, nxfe=nxfe, ntfe=ntfe, tfe_width=tfe_width)
         horizon = tfe_width * ntfe
         # Add objective function
@@ -474,21 +486,22 @@ class DynamicMbclcMethane(PseTestProblemBase):
         # with the initial steady state will override the disturbance.
         disturbance = _get_disturbance_data(horizon=horizon)
         dyn.load_data(disturbance)
-        # Setting an additional disturbance for the first minute of operation makes
-        # the problem more difficult to solve. We stop converging at about 1800 K.
-        for t in m.fs.time:
-            if t <= 60.0+1e-6: # Account for float roundoff in time points
-                m.fs.moving_bed.solid_inlet.temperature[t].fix(1800.0*pyo.units.K)
 
-        # Apply a perturbation to the initial condition of the dynamic model.
-        # This doesn't even converge with a 1% perturbation for all x. Maybe I need
-        # to only perturb a limited x?
-        t0 = m.fs.time.first()
-        for x in m.fs.moving_bed.length_domain:
-            # I don't think we need to skip the inlet here.
-            if x >= 0.8-1e-6:
-                for var in m.fs.moving_bed.solid_phase.material_holdup[t0, x, ...]:
-                    var.set_value(var.value * 0.9)
+        ## Setting an additional disturbance for the first minute of operation makes
+        ## the problem more difficult to solve. We stop converging at about 1800 K.
+        #for t in m.fs.time:
+        #    if t <= 60.0+1e-6: # Account for float roundoff in time points
+        #        m.fs.moving_bed.solid_inlet.temperature[t].fix(1800.0*pyo.units.K)
+
+        ## Apply a perturbation to the initial condition of the dynamic model.
+        ## This doesn't even converge with a 1% perturbation for all x. Maybe I need
+        ## to only perturb a limited x?
+        #t0 = m.fs.time.first()
+        #for x in m.fs.moving_bed.length_domain:
+        #    # I don't think we need to skip the inlet here.
+        #    if x >= 0.8-1e-6:
+        #        for var in m.fs.moving_bed.solid_phase.material_holdup[t0, x, ...]:
+        #            var.set_value(var.value * 0.9)
 
         assert_primal_feasibility(m_init, atol=1e-5)
         m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
