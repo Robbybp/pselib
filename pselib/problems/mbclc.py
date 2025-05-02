@@ -200,10 +200,7 @@ def _initialize(model):
 
 class SteadyMbclcMethane(PseTestProblemBase):
 
-    @classmethod
-    @property
-    def uid(cls):
-        return "MBCLC-METHANE-STEADY"
+    uid = "MBCLC-METHANE-STEADY"
 
     def __init__(self):
         # TODO: allow specification of parameters as configuration arg?
