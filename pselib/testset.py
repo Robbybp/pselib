@@ -31,7 +31,12 @@ TEST_PROBLEM_LOOKUP = {
 
 
 def get_problem(uid):
-    return TEST_PROBLEM_LOOKUP[uid]()
+    if uid in TEST_PROBLEM_LOOKUP:
+        return TEST_PROBLEM_LOOKUP[uid]()
+    else:
+        msg = f"Invalid test problem UID {uid}. Valid options are:"
+        msg += "\n" + "\n".join(list(TEST_PROBLEM_LOOKUP.keys()))
+        raise ValueError(msg)
 
 
 class TestSet:
