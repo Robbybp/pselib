@@ -26,7 +26,7 @@ from pselib.problems.mbclc import (
 import pyomo.environ as pyo
 from pyomo.contrib.incidence_analysis import IncidenceGraphInterface
 
-from var_elim.elimination_callbacks import matching_elim_callback
+from var_elim.elimination_callbacks import matching_elim_callback, d2_elim_callback
 from idaes.core.util.model_statistics import large_residuals_set
 
 
@@ -53,6 +53,8 @@ class TestDynamicMbclcMethane:
     def test_solve(self):
         problem = DynamicMbclcMethane()
         m = problem.create_instance(nxfe=20)
+        parameters = {"fs.moving_bed.solid_inlet.temperature": 1900.0}
+        problem.set_parameter_values(m, parameters)
         solver = pyo.SolverFactory("cyipopt")
         #solver.config.options["nlp_scaling_method"] = "user-scaling"
         #pyo.TransformationFactory("core.scale_model").apply_to(m)
@@ -69,6 +71,7 @@ class TestDynamicMbclcMethane:
             print(f"{val}  {con.name}")
         print("--------------------")
         #matching_elim_callback(m)
+        #d2_elim_callback(m)
         res = solver.solve(m, tee=True)
         violated_cons = large_residuals_set(m, tol=1e-5)
         pyo.assert_optimal_termination(res)
